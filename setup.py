@@ -77,19 +77,28 @@ def parse_requirements(fname='requirements.txt', with_version=True):
 
 
 if __name__ == "__main__":
-    # currently configuration with pyproject.toml is *BETA*
-    setup(name='cryostar',
-          version='0.1.0',
-          packages=find_packages(exclude=("projects", "assets")),
-          include_package_data=True,
-          entry_points=
-          {'console_scripts': [
-              'cstar_show_mrc_info=cryostar.cli_tools.sak:show_mrc_info',
-              'cstar_center_origin=cryostar.cli_tools.sak:center_origin',
-              'cstar_generate_gaussian_density=cryostar.cli_tools.sak:generate_gaussian_density'
-          ], },
-          license='Apache-2.0 License',
-          author='Yi Zhou, Jing Yuan, Yilai Li',
-          author_email='zhouyi.naive@bytedance.com, yuanjing.eugene@bytedance.com, yilai.li@bytedance.com',
-          description='ByteResearch CryoEM package',
-          install_requires=parse_requirements('requirements.txt'))
+    # Use pyproject.toml metadata for builds; keep setup for legacy installers.
+    extras = {
+        'dev': ['pre-commit', 'yapf', 'isort', 'autoflake', 'nbqa'],
+        'viz': ['jupyterlab', 'matplotlib', 'seaborn', 'nglview'],
+        'medical': ['umap-learn[plot]'],
+    }
+    setup(
+        name='cryostar',
+        version='0.1.0',
+        packages=find_packages(exclude=("projects", "assets")),
+        include_package_data=True,
+        entry_points={
+            'console_scripts': [
+                'cstar_show_mrc_info=cryostar.cli_tools.sak:show_mrc_info',
+                'cstar_center_origin=cryostar.cli_tools.sak:center_origin',
+                'cstar_generate_gaussian_density=cryostar.cli_tools.sak:generate_gaussian_density'
+            ],
+        },
+        license='Apache-2.0 License',
+        author='Yi Zhou, Jing Yuan, Yilai Li',
+        author_email='zhouyi.naive@bytedance.com, yuanjing.eugene@bytedance.com, yilai.li@bytedance.com',
+        description='ByteResearch CryoEM package',
+        install_requires=parse_requirements('requirements.txt'),
+        extras_require=extras,
+    )

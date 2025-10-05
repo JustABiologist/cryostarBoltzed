@@ -16,7 +16,8 @@ import torch.nn.functional as F
 
 from cryostar.common.residue_constants import ca_ca
 from cryostar.utils.misc import log_to_current
-from cryostar.utils.ml_modules import VAEEncoder, Decoder, reparameterize
+from cryostar.utils.ml_modules import VAEEncoder, Decoder, reparameterize, BernoulliEncoder, reparameterize_bernoulli_st
+from cryostar.utils.rbm import RBM
 from cryostar.utils.ctf import parse_ctf_star
 
 from lightning.pytorch.utilities import rank_zero_only
@@ -235,10 +236,18 @@ class VAE(nn.Module):
         out_dim: int,
         e_hidden_layers: int,
         d_hidden_layers: int,
+        prior_type: str = "gaussian",
+        rbm_hidden_dim: int = 128,
     ):
         super().__init__()
+        self.prior_type = prior_type
         if encoder_cls == "MLP":
-            self.encoder = VAEEncoder(in_dim, e_hidden_dim, latent_dim, e_hidden_layers)
+            if prior_type == "gaussian":
+                self.encoder = VAEEncoder(in_dim, e_hidden_dim, latent_dim, e_hidden_layers)
+            elif prior_type == "rbm":
+                self.encoder = BernoulliEncoder(in_dim, e_hidden_dim, latent_dim, e_hidden_layers)
+            else:
+                raise Exception(f"Unknown prior_type {prior_type}")
         else:
             raise Exception()
 
@@ -248,12 +257,26 @@ class VAE(nn.Module):
             print(f"{decoder_cls} not in presets, you may set it manually later.")
             self.decoder: torch.nn.Module
 
+        if self.prior_type == "rbm":
+            self.rbm = RBM(visible_dim=latent_dim, hidden_dim=rbm_hidden_dim)
+
     def encode(self, x, idx):
-        mean, log_var = self.encoder(x)
-        return mean, log_var
+        if self.prior_type == "gaussian":
+            mean, log_var = self.encoder(x)
+            return mean, log_var
+        elif self.prior_type == "rbm":
+            probs, logits = self.encoder(x)
+            return probs, logits
+        else:
+            raise Exception
 
     def forward(self, x, idx, *args):
-        mean, log_var = self.encode(x, idx)
-        z = reparameterize(mean, log_var)
+        enc_out0, enc_out1 = self.encode(x, idx)
+        if self.prior_type == "gaussian":
+            z = reparameterize(enc_out0, enc_out1)
+        elif self.prior_type == "rbm":
+            z = reparameterize_bernoulli_st(enc_out0)
+        else:
+            raise Exception
         out = self.decoder(z)
-        return out, mean, log_var
+        return out, enc_out0, enc_out1

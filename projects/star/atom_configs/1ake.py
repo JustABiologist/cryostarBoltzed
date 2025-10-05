@@ -44,6 +44,9 @@ model = dict(model_type="VAE",
                  d_hidden_dim=(512, 256, 128, 64, 32)[::-1],
                  e_hidden_layers=5,
                  d_hidden_layers=5,
+                 # latent prior options: 'gaussian' or 'rbm'
+                 prior_type='rbm',
+                 rbm_hidden_dim=128,
              ))
 
 loss = dict(
@@ -61,7 +64,11 @@ loss = dict(
     clash_weight=1.0,
     warmup_step=10000,
     kl_beta_upper=0.5,
-    free_bits=3.0)
+    free_bits=3.0,
+    # RBM-specific knobs
+    rbm_cd_k=1,
+    rbm_cd_weight=0.1,
+)
 
 optimizer = dict(lr=1e-4, )
 
@@ -70,7 +77,7 @@ analyze = dict(cluster_k=10, skip_umap=True)
 runner = dict(log_every_n_step=50, )
 
 trainer = dict(max_steps=24000,
-               devices=4,
+               devices=1,
                precision="16-mixed",
                num_sanity_val_steps=0,
                val_check_interval=6000,

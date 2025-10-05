@@ -12,7 +12,18 @@ def merge_step_outputs(outputs):
 def squeeze_dict_outputs_1st_dim(outputs):
     res = {}
     for k in outputs.keys():
-        res[k] = outputs[k].flatten(start_dim=0, end_dim=1)
+        t = outputs[k]
+        # Make robust to 0D/1D tensors and empty outputs
+        if not isinstance(t, torch.Tensor):
+            res[k] = t
+            continue
+        if t.ndim <= 1:
+            res[k] = t
+        elif t.ndim == 2:
+            res[k] = t
+        else:
+            # collapse all leading dims except the last feature dim(s)
+            res[k] = t.flatten(start_dim=0, end_dim=t.ndim - 2)
     return res
 
 

@@ -13,7 +13,15 @@ The detailed user guide can be found at [here](https://byte-research.gitbook.io/
 ## Installation
 
 - Create a conda environment: `conda create -n cryostar python=3.9 -y`
-- Clone this repository and install the package: `git clone https://github.com/bytedance/cryostar.git && cd cryostar && pip install .`
+- Clone this repository and install the package using PEP 517 build: `pip install .` or `pip install -e .`
+
+### Cluster-friendly tips
+
+- Choose your torch build per cluster (CPU or CUDA):
+  - CPU only: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
+  - CUDA 12.1: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121`
+- Then install CryoSTAR: `pip install .`
+- Lightning will auto-select CPU/GPU. Set devices in configs or override via CLI/trainer flags.
 
 ## Quick start
 

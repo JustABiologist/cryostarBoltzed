@@ -40,6 +40,7 @@ from cryostar.utils.latent_space_utils import get_nearest_point, cluster_kmeans,
 from cryostar.utils.vis_utils import plot_z_dist, save_tensor_image
 from cryostar.utils.pl_utils import merge_step_outputs, squeeze_dict_outputs_1st_dim, \
     filter_outputs_by_indices, get_1st_unique_indices
+from cryostar.utils.ml_modules import reparameterize_bernoulli_st
 
 from miscs import calc_pair_dist_loss, calc_clash_loss, low_pass_mask2d, VAE, infer_ctf_params_from_config
 
@@ -158,6 +159,12 @@ class CryoEMTask(pl.LightningModule):
                          out_dim=num_pts * 3 if nma_modes is None else 6 + nma_modes.shape[1],
                          **cfg.model.model_cfg)
         log_to_current('Model summary:\n' + str(summary(self.model, input_size=[(1, in_dim), (1,)], verbose=0)))
+        # Log which latent prior is used (gaussian or rbm)
+        try:
+            prior_type = getattr(self.model, 'prior_type', 'gaussian')
+            log_to_current(f"VAE prior_type={prior_type}")
+        except Exception:
+            pass
         if nma_modes is None:
             self.deformer = E3Deformer()
         else:
@@ -379,12 +386,16 @@ class CryoEMTask(pl.LightningModule):
 
     def _save_batched_strucs(self, pred_strucs, save_path):
         ref_atom_arr = self.template_pdb.copy()
+        # Center saved structures to the reference centroid to avoid global shifts
+        ref_centroid = ref_atom_arr.coord.mean(axis=0)
         atom_arrs = []
         b = pred_strucs.shape[0]
         for i in range(b):
             tmp_struc = pred_strucs[i].cpu().numpy()
             tmp_atom_arr = ref_atom_arr.copy()
-            tmp_atom_arr.coord = tmp_struc
+            # Remove predicted centroid and recenter to reference centroid
+            tmp_center = tmp_struc.mean(axis=0)
+            tmp_atom_arr.coord = tmp_struc - tmp_center + ref_centroid
             atom_arrs.append(tmp_atom_arr)
 
         bt_save_pdb(save_path, struc.stack(atom_arrs))
@@ -481,10 +492,36 @@ class CryoEMTask(pl.LightningModule):
         else:
             weighted_clash_loss = weighted_gmm_proj_loss.new_tensor(0.)
 
-        # KL
-        kl_loss = calc_kl_loss(mu, log_var, self.cfg.loss.free_bits)
-        kl_beta = warmup(cfg.loss.warmup_step, upper=cfg.loss.kl_beta_upper)(self.global_step)
-        weighted_kld_loss = kl_beta * kl_loss / self.mask.num_masked
+        # KL / prior regularization
+        if getattr(self.model, "prior_type", "gaussian") == "gaussian":
+            kl_loss = calc_kl_loss(mu, log_var, self.cfg.loss.free_bits)
+            kl_beta = warmup(cfg.loss.warmup_step, upper=cfg.loss.kl_beta_upper)(self.global_step)
+            weighted_kld_loss = kl_beta * kl_loss / self.mask.num_masked
+            kld_per_dim = kl_loss
+        elif getattr(self.model, "prior_type", "gaussian") == "rbm":
+            probs = mu
+            z_sample = reparameterize_bernoulli_st(probs)
+            free_e = self.model.rbm.free_energy(z_sample)
+            free_e = free_e.mean()
+            eps = 1e-8
+            ent = (-probs * torch.log(probs + eps) - (1 - probs) * torch.log(1 - probs + eps)).sum(dim=-1).mean()
+            kl_like = free_e - ent
+            kl_beta = warmup(cfg.loss.warmup_step, upper=cfg.loss.kl_beta_upper)(self.global_step)
+            weighted_kld_loss = kl_beta * kl_like / self.mask.num_masked
+            # Optional negative phase via CD-k to better train RBM parameters
+            cd_k = getattr(cfg.loss, 'rbm_cd_k', 1)
+            cd_w = getattr(cfg.loss, 'rbm_cd_weight', 0.1)
+            cd_term = self.model.rbm.cd_loss(z_sample.detach(), k=cd_k).mean()
+            weighted_kld_loss = weighted_kld_loss + cd_w * cd_term
+            kld_per_dim = kl_like / probs.shape[-1]
+            rbm_metrics = {
+                "rbm_free_e": float(free_e.detach().cpu()),
+                "rbm_entropy": float(ent.detach().cpu()),
+                "rbm_cd": float(cd_term.detach().cpu()),
+                "rbm_kl_like": float(kl_like.detach().cpu()),
+            }
+        else:
+            raise NotImplementedError
 
         # clac loss
         loss = (weighted_kld_loss + weighted_gmm_proj_loss + weighted_connect_loss + weighted_dist_loss +
@@ -499,8 +536,10 @@ class CryoEMTask(pl.LightningModule):
             # "dist_penalty": weighted_dist_penalty.item(),
             "clash": weighted_clash_loss.item(),
             "kld": weighted_kld_loss.item(),
-            "kld(/dim)": kl_loss.item()
+            "kld(/dim)": float(kld_per_dim.detach().cpu())
         }
+        if getattr(self.model, "prior_type", "gaussian") == "rbm":
+            tmp_metric.update(rbm_metrics)
         if self.global_step % cfg.runner.log_every_n_step == 0:
             self.log_dict(tmp_metric)
             log_to_current(f"epoch {self.current_epoch} [{batch_idx}/{self.trainer.num_training_batches}] | " +
@@ -571,13 +610,18 @@ class CryoEMTask(pl.LightningModule):
 
             # --------
             # pca
+            # Log PCA explained variance once for transparency
+            pc, pca = run_pca(z_list)
+            try:
+                np.savetxt(osp.join(save_dir, "pca_explained_variance_ratio.txt"), pca.explained_variance_ratio_, fmt='%.6f')
+            except Exception:
+                pass
+
             for pca_dim in range(1, 1 + min(3, self.cfg.model.model_cfg.latent_dim)):
-                pc, pca = run_pca(z_list)
                 start = np.percentile(pc[:, pca_dim - 1], 5)
                 stop = np.percentile(pc[:, pca_dim - 1], 95)
+                # Use the continuous PCA trajectory directly (do not snap to nearest points)
                 z_pc_traj = get_pc_traj(pca, z_list.shape[1], 10, pca_dim, start, stop)
-                z_pc_traj, _ = get_nearest_point(z_list, z_pc_traj)
-
                 z_pc_traj = torch.from_numpy(z_pc_traj)
                 pred_struc = self._shared_decoding(z_pc_traj)
 
@@ -689,12 +733,16 @@ def train():
 
     if not cfg.eval_mode and cfg.do_ref_init:
         init_task = InitTask(em_task)
-        # if you meet libibverbs warnings, try process_group_backend="gloo"
+        use_gpu = torch.cuda.is_available()
+        backend = "nccl" if use_gpu else "gloo"
+        # Avoid DDP for single-device runs; fall back to auto
+        init_strategy = (DDPStrategy(process_group_backend=backend, find_unused_parameters=True)
+                         if cfg.trainer.devices and cfg.trainer.devices > 1 else "auto")
         init_trainer = pl.Trainer(max_epochs=3,
                                   devices=cfg.trainer.devices,
-                                  accelerator="gpu" if torch.cuda.is_available() else "cpu",
+                                  accelerator="gpu" if use_gpu else "cpu",
                                   precision=cfg.trainer.precision,
-                                  strategy=DDPStrategy(process_group_backend="nccl", find_unused_parameters=True),
+                                  strategy=init_strategy,
                                   logger=False,
                                   enable_checkpointing=False,
                                   enable_model_summary=False,
@@ -703,8 +751,14 @@ def train():
 
         init_trainer.fit(init_task, train_dataloaders=train_loader)
 
-    em_trainer = pl.Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu",
-                            strategy=DDPStrategy(process_group_backend="nccl"),
+    # Select backend based on availability: NCCL for multi-GPU, Gloo for CPU
+    use_gpu = torch.cuda.is_available()
+    backend = "nccl" if use_gpu else "gloo"
+    # Avoid DDP for single-device runs; fall back to auto
+    em_strategy = (DDPStrategy(process_group_backend=backend)
+                   if cfg.trainer.devices and cfg.trainer.devices > 1 else "auto")
+    em_trainer = pl.Trainer(accelerator="gpu" if use_gpu else "cpu",
+                            strategy=em_strategy,
                             logger=False,
                             enable_checkpointing=False,
                             enable_model_summary=False,

@@ -45,9 +45,9 @@ loss = dict(
 
 trainer = dict(
     max_epochs=5,
-    devices=4,
-    precision="16-mixed",
+    devices=1,
+    precision="32",
     num_sanity_val_steps=0,
-    val_check_interval=None,
-    check_val_every_n_epoch=5
+    val_check_interval=500,
+    check_val_every_n_epoch=None
 )

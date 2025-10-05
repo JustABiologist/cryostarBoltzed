@@ -124,6 +124,9 @@ model = dict(
         d_hidden_dim=(32, 64, 128, 256, 512),
         e_hidden_layers=5,
         d_hidden_layers=5,
+        # prior options: 'gaussian' (default) or 'rbm'
+        prior_type='gaussian',
+        rbm_hidden_dim=128,
     ))
 
 # ==========================================

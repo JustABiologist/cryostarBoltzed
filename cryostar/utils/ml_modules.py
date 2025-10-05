@@ -121,3 +121,43 @@ def reparameterize(mu, log_var):
     std = torch.exp(0.5 * log_var)
     eps = torch.randn_like(std)
     return mu + eps * std
+
+
+class BernoulliEncoder(nn.Module):
+
+    def __init__(self, in_dim: int, hidden_dim: Union[int, List[int]], out_dim: int, num_hidden_layers=3):
+        super().__init__()
+        self.in_dim = in_dim
+        if isinstance(hidden_dim, int):
+            self.hidden_dim = (hidden_dim, ) * num_hidden_layers
+        elif isinstance(hidden_dim, (list, tuple)):
+            assert len(hidden_dim) == num_hidden_layers
+            self.hidden_dim = hidden_dim
+        else:
+            raise NotImplementedError
+        self.out_dim = out_dim
+        self.num_hidden_layers = num_hidden_layers
+
+        self.input_layer = nn.Sequential(
+            ResLinear(in_dim, self.hidden_dim[0]) if in_dim == self.hidden_dim[0] else Linear(
+                in_dim, self.hidden_dim[0]), nn.ReLU(inplace=True))
+        self.mlp = MLP(self.hidden_dim[:-1], self.hidden_dim[1:])
+
+        self.logits_layer = Linear(self.hidden_dim[-1], out_dim)
+
+    def forward(self, x):
+        x = self.mlp(self.input_layer(x))
+        logits = self.logits_layer(x)
+        probs = torch.sigmoid(logits)
+        return probs, logits
+
+
+def reparameterize_bernoulli_st(probs: torch.Tensor) -> torch.Tensor:
+    """Straight-through Bernoulli sampling.
+
+    Draws a Bernoulli sample in the forward pass and uses the identity in the backward pass.
+    """
+    with torch.no_grad():
+        sample = torch.bernoulli(probs)
+    # Straight-through estimator
+    return sample + (probs - probs.detach())
